@@ -1,21 +1,7 @@
 import { NextResponse } from "next/server";
-import { readFileSync, existsSync } from "fs";
-import { join } from "path";
-
-function getOpenAIKey(): string | undefined {
-  if (process.env.OPENAI_API_KEY) return process.env.OPENAI_API_KEY;
-  try {
-    const parentEnv = join(process.cwd(), "..", ".env");
-    if (existsSync(parentEnv)) {
-      const content = readFileSync(parentEnv, "utf8");
-      const match = content.match(/OPENAI_API_KEY\s*=\s*(.+)/m);
-      if (match) return match[1].trim().replace(/^["']|["']$/g, "");
-    }
-  } catch {
-    // ignore
-  }
-  return undefined;
-}
+import { getOpenAIKey } from "@/lib/openai";
+import { prisma } from "@/lib/db";
+import { auditCaseEvent } from "@/lib/audit";
 
 const SOC_SYSTEM_PROMPT = `You are an AI SOC (Security Operations Center) Tier-1 copilot. Your job is to triage security alerts and incidents.
 
@@ -99,7 +85,8 @@ const KNOWLEDGE_BASE: KnowledgeBaseIncident[] = [
       "Endpoint agent detected suspicious process tree spawning powershell.exe, dropping unknown binary in AppData, and making outbound connections to known C2 infrastructure.",
     mitreTechniques: [
       { id: "T1204", name: "User Execution" },
-      { id: "T1046", name: "Network Service Discovery" },
+      { id: "T1071", name: "Application Layer Protocol" },
+      { id: "T1041", name: "Exfiltration Over C2 Channel" },
     ],
     riskScore: 93,
     recommendedActions: [
@@ -284,7 +271,8 @@ In production, the copilot would orchestrate EDR, SIEM, and ticketing tools to d
       riskScore: 92,
       mitreTechniques: [
         { id: "T1204", name: "User Execution" },
-        { id: "T1046", name: "Network Service Discovery" },
+        { id: "T1071", name: "Application Layer Protocol" },
+        { id: "T1041", name: "Exfiltration Over C2 Channel" },
       ],
       recommendedActions: [
         {
@@ -337,6 +325,7 @@ export async function POST(request: Request) {
   try {
     const body = await request.json();
     const messages: Message[] = Array.isArray(body.messages) ? body.messages : [];
+    const caseId = typeof body.caseId === "string" ? body.caseId.trim() : "";
 
     const lastUser = messages.filter((m) => m.role === "user").pop();
     const userContent = lastUser?.content?.trim() ?? "";
@@ -421,7 +410,7 @@ Remember: Use these past incidents only as reference examples. Do not copy their
           { status: 502 },
         );
       }
-      return NextResponse.json({
+      const payload = {
         message: content,
         evidence: ["LLM analysis"],
         severity: "Medium",
@@ -430,7 +419,24 @@ Remember: Use these past incidents only as reference examples. Do not copy their
         mitreTechniques: [],
         recommendedActions: [],
         similarIncidents,
-      });
+      };
+
+      if (caseId) {
+        await prisma.message.createMany({
+          data: [
+            { caseId, role: "user", content: userContent },
+            { caseId, role: "assistant", content, metadata: payload as any },
+          ],
+        });
+        await auditCaseEvent({
+          caseId,
+          action: "TRIAGE_RUN",
+          actor: "system",
+          detail: { mode: "llm" },
+        });
+      }
+
+      return NextResponse.json(payload);
     }
 
     const {
@@ -442,7 +448,7 @@ Remember: Use these past incidents only as reference examples. Do not copy their
       mitreTechniques,
       recommendedActions,
     } = ruleBasedTriage(userContent);
-    return NextResponse.json({
+    const payload = {
       message,
       evidence,
       severity,
@@ -451,7 +457,24 @@ Remember: Use these past incidents only as reference examples. Do not copy their
       mitreTechniques,
       recommendedActions,
       similarIncidents,
-    });
+    };
+
+    if (caseId) {
+      await prisma.message.createMany({
+        data: [
+          { caseId, role: "user", content: userContent },
+          { caseId, role: "assistant", content: message, metadata: payload as any },
+        ],
+      });
+      await auditCaseEvent({
+        caseId,
+        action: "TRIAGE_RUN",
+        actor: "system",
+        detail: { mode: "rules" },
+      });
+    }
+
+    return NextResponse.json(payload);
   } catch (e) {
     console.error("soc-copilot API error:", e);
     return NextResponse.json(

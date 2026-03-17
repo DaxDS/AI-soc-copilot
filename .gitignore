@@ -2,6 +2,10 @@
 
 # dependencies
 /node_modules
+/.env
+/.env.local
+dev.db
+prisma/dev.db
 /.pnp
 .pnp.*
 .yarn/*

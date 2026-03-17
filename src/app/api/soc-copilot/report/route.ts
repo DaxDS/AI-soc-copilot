@@ -1,14 +1,26 @@
 import { NextResponse } from "next/server";
+import { prisma } from "@/lib/db";
+import { auditCaseEvent } from "@/lib/audit";
 
 type MitreTechnique = { id?: string; name?: string };
+
+/** Severity derived only from risk score: 0–30 Low, 31–60 Medium, 61–80 High, 81–100 Critical. */
+function getSeverityFromRisk(score: number): "Low" | "Medium" | "High" | "Critical" {
+  const s = Math.max(0, Math.min(100, score));
+  if (s <= 30) return "Low";
+  if (s <= 60) return "Medium";
+  if (s <= 80) return "High";
+  return "Critical";
+}
 
 export async function POST(request: Request) {
   try {
     const body = await request.json();
     const {
+      caseId = "",
       incidentTitle = "Incident",
       incidentSummary = "",
-      severity = "Unknown",
+      severity: severityFromBody = "Unknown",
       riskScore,
       timeline = [],
       actionsTaken = [],
@@ -30,6 +42,9 @@ export async function POST(request: Request) {
       ? (affectedAssets as string[]).map((a) => `- ${a}`)
       : [];
 
+    const severity = riskScore != null ? getSeverityFromRisk(riskScore) : severityFromBody;
+    const riskLabel = riskScore != null ? getSeverityFromRisk(riskScore) : "—";
+
     const lines: string[] = [
       "# Investigation Report",
       "",
@@ -42,9 +57,7 @@ export async function POST(request: Request) {
       incidentSummary || "",
       "",
       "## Risk Score",
-      riskScore != null
-        ? `Overall risk: **${riskScore}/100** – ${riskScore >= 70 ? "High" : riskScore >= 40 ? "Medium" : "Low"}`
-        : "—",
+      riskScore != null ? `Overall risk: **${riskScore}/100** – ${riskLabel}` : "—",
       "",
       "## MITRE ATT&CK Techniques",
       ...(mitreList.length > 0 ? mitreList : ["- None identified."]),
@@ -54,7 +67,15 @@ export async function POST(request: Request) {
       "",
       "## Attack Timeline",
       ...(Array.isArray(timeline) && timeline.length > 0
-        ? timeline.map((e: { time?: string; event?: string }) => `- **${e.time ?? ""}** – ${e.event ?? ""}`)
+        ? timeline.map(
+            (e: { time?: string; event?: string; rawEvidence?: string }) =>
+              [
+                `- **${e.time ?? ""}** – ${e.event ?? ""}`,
+                e.rawEvidence ? `  - Raw evidence: \`${e.rawEvidence}\`` : "",
+              ]
+                .filter(Boolean)
+                .join("\n"),
+          )
         : ["- No timeline available."]),
       "",
       "## Triage Summary",
@@ -73,6 +94,20 @@ export async function POST(request: Request) {
     ];
 
     const markdown = lines.filter(Boolean).join("\n");
+
+    if (typeof caseId === "string" && caseId.trim()) {
+      const trimmedCaseId = caseId.trim();
+      await prisma.report.create({
+        data: { caseId: trimmedCaseId, markdown },
+      });
+      await auditCaseEvent({
+        caseId: trimmedCaseId,
+        action: "REPORT_GENERATED",
+        actor: "system",
+        detail: { incidentTitle },
+      });
+    }
+
     return NextResponse.json({ markdown });
   } catch (e) {
     console.error("report error:", e);

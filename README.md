@@ -1,36 +1,70 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+## AI SOC Copilot (Sellable v1)
 
-## Getting Started
+AI SOC Copilot is a **Tier‑1 triage + investigation assistant** for security alerts. It helps a SOC analyst move from raw alert text → triage summary → investigation timeline → actions → **auditable report**.
 
-First, run the development server:
+### What makes this “product‑ready”
+- **Case management**: alerts become persisted cases (SQLite via Prisma).
+- **Audit trail**: every triage/report action can be recorded per case.
+- **Ingestion**: a webhook endpoint to ingest alerts from external systems (SIEM/SOAR) without UI clicks.
+- **Human‑in‑the‑loop**: recommendations can be reviewed/approved by an analyst (UI workflow).
+
+## Local setup
+
+### Prereqs
+- Node.js + npm
+
+### Configure env
+Copy `.env.example` to `.env` and set at least:
+- **`DATABASE_URL`**: `file:./dev.db`
+- **`OPENAI_API_KEY`** (optional): enables richer responses on the `/api/soc-copilot/*` routes
+- **`INGEST_WEBHOOK_SECRET`**: required for `/api/ingest/webhook`
+
+### Install + migrate + run
 
 ```bash
+npm install
+npx prisma migrate dev --name init
 npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+Open `http://localhost:3000`.
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+## API endpoints (v1)
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+### Cases
+- `GET /api/cases` — list cases
+- `POST /api/cases` — create case
+- `GET /api/cases/:id` — case details (messages + reports)
+- `PATCH /api/cases/:id` — update status/title/summary
+- `GET /api/cases/:id/audit` — audit events
 
-## Learn More
+### Copilot actions (persist when `caseId` provided)
+- `POST /api/soc-copilot` — triage chat; if `caseId` is included, stores user+assistant messages and a `TRIAGE_RUN` audit event
+- `POST /api/soc-copilot/report` — generates markdown report; if `caseId` is included, stores report and a `REPORT_GENERATED` audit event
 
-To learn more about Next.js, take a look at the following resources:
+### Ingestion webhook (SIEM/SOAR friendly)
+`POST /api/ingest/webhook`
+- Header: `Authorization: Bearer <INGEST_WEBHOOK_SECRET>`
+- Body example:
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+```json
+{
+  "title": "Impossible travel sign-in",
+  "summary": "Sentinel: Impossible travel sign-in for user j.doe@company.com — Brazil and Germany within 28 minutes.",
+  "severity": "High",
+  "source": "Microsoft Sentinel",
+  "riskScore": 85,
+  "raw": { "any": "original payload you want to store" }
+}
+```
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+Response: `{ "caseId": "..." }`
 
-## Deploy on Vercel
+## Demo script (for selling)
+1. Click **Sample incidents** to create a case and run triage.
+2. Generate the **Investigation Report** (stored under the case).
+3. Hit the ingestion webhook from Postman to create a new case automatically.
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
-
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+## Notes
+- This repo uses SQLite for speed of iteration. For production, swap to Postgres and add auth/SSO + role-based access.
+- Don’t commit secrets. Keep `OPENAI_API_KEY` and `INGEST_WEBHOOK_SECRET` in environment variables.

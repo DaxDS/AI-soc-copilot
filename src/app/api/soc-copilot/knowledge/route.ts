@@ -1,19 +1,5 @@
 import { NextResponse } from "next/server";
-import { readFileSync, existsSync } from "fs";
-import { join } from "path";
-
-function getOpenAIKey(): string | undefined {
-  if (process.env.OPENAI_API_KEY) return process.env.OPENAI_API_KEY;
-  try {
-    const parentEnv = join(process.cwd(), "..", ".env");
-    if (existsSync(parentEnv)) {
-      const content = readFileSync(parentEnv, "utf8");
-      const match = content.match(/OPENAI_API_KEY\s*=\s*(.+)/m);
-      if (match) return match[1].trim().replace(/^["']|["']$/g, "");
-    }
-  } catch {}
-  return undefined;
-}
+import { getOpenAIKey } from "@/lib/openai";
 
 const KNOWLEDGE_PROMPT = `You are a SOC knowledge assistant. Answer questions about security operations, alert types, and investigation steps. Be concise and practical. Examples of what you explain:
 - What "Impossible travel" or "suspicious sign-in" means and how to investigate
