@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { getOpenAIKey } from "@/lib/openai";
+import { getAnthropicKey } from "@/lib/openai";
 import { prisma } from "@/lib/db";
 import { auditCaseEvent } from "@/lib/audit";
 
@@ -10,9 +10,9 @@ For any alert or incident summary the user provides, your internal reasoning sho
 - Assessment: severity (Low/Medium/High/Critical), confidence, and likely attack step.
 - Recommended actions: concrete next steps (e.g., force sign-out, isolate host, quarantine email) and which require human approval.
 
-You may be provided with "Similar Past Incidents" from a knowledge base. Use these past incidents only as reference examples. Analyze the current incident independently and generate a fresh explanation, risk assessment, and recommended response actions. If the current incident differs from past ones, propose new actions or analysis tailored to this alert.
+You may be provided with "Similar Past Incidents" from a knowledge base. Use these past incidents only as reference examples. Analyze the current incident independently and generate a fresh explanation.
 
-However, your final response will be post-processed by the application, so return a clear, concise explanation as free-form text. Do not invent specific IOCs or log lines; say what you "would" pull or "would" check. If the input is vague, ask for one or two more details (e.g., which tool generated the alert, user/host name).`;
+However, your final response will be post-processed by the application, so return a clear, concise explanation as free-form text. Do not invent specific IOCs or log lines; say what you "would" pull from logs or tools.`;
 
 type Message = { role: "user" | "assistant"; content: string };
 
@@ -294,7 +294,7 @@ In production, the copilot would orchestrate EDR, SIEM, and ticketing tools to d
     };
   }
   return {
-    message: `Here’s how I’d handle this as a Tier‑1 SOC copilot:
+    message: `Here's how I'd handle this as a Tier‑1 SOC copilot:
 
 1. **Enrichment**: Pull related logs, user context, and asset criticality.
 2. **Assessment**: Classify severity, confidence, and likely attack step.
@@ -339,8 +339,8 @@ export async function POST(request: Request) {
 
     const similarIncidents = getSimilarIncidents(userContent);
 
-    const apiKey = getOpenAIKey();
-    if (apiKey) {
+    const anthropicApiKey = getAnthropicKey();
+    if (anthropicApiKey) {
       const similarSection =
         similarIncidents.length > 0
           ? `Similar Past Incidents (for reference only):
@@ -365,37 +365,30 @@ ${actionsList}`;
 Remember: Use these past incidents only as reference examples. Do not copy their actions verbatim; adjust your reasoning and recommendations to the current incident.`
           : "No similar past incidents were found in the knowledge base for this alert.";
 
-      const openaiMessages: {
-        role: "system" | "user" | "assistant";
-        content: string;
-      }[] = [
-        { role: "system", content: SOC_SYSTEM_PROMPT },
-        {
-          role: "system",
-          content: similarSection,
-        },
-        ...messages.map((m) => ({
-          role: m.role as "user" | "assistant",
-          content: m.content,
-        })),
-      ];
+      const systemPrompt = `${SOC_SYSTEM_PROMPT}\n\n${similarSection}`;
+      const anthropicMessages = messages.map((m) => ({
+        role: m.role,
+        content: m.content,
+      }));
 
-      const res = await fetch("https://api.openai.com/v1/chat/completions", {
+      const res = await fetch("https://api.anthropic.com/v1/messages", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          Authorization: `Bearer ${apiKey}`,
+          "x-api-key": anthropicApiKey,
+          "anthropic-version": "2023-06-01",
         },
         body: JSON.stringify({
-          model: "gpt-4o-mini",
-          messages: openaiMessages,
+          model: "claude-sonnet-4-5",
           max_tokens: 1024,
+          system: systemPrompt,
+          messages: anthropicMessages,
         }),
       });
 
       if (!res.ok) {
         const err = await res.text();
-        console.error("OpenAI API error:", res.status, err);
+        console.error("Anthropic API error:", res.status, err);
         return NextResponse.json(
           { error: "LLM request failed", detail: err },
           { status: 502 },
@@ -403,13 +396,21 @@ Remember: Use these past incidents only as reference examples. Do not copy their
       }
 
       const data = await res.json();
-      const content = data?.choices?.[0]?.message?.content?.trim();
+      const content = Array.isArray(data?.content)
+        ? data.content
+            .filter((block: { type?: string; text?: string }) => block.type === "text")
+            .map((block: { text?: string }) => block.text ?? "")
+            .join("\n")
+            .trim()
+        : "";
+
       if (!content) {
         return NextResponse.json(
           { error: "Empty response from LLM" },
           { status: 502 },
         );
       }
+
       const payload = {
         message: content,
         evidence: ["LLM analysis"],
@@ -432,7 +433,7 @@ Remember: Use these past incidents only as reference examples. Do not copy their
           caseId,
           action: "TRIAGE_RUN",
           actor: "system",
-          detail: { mode: "llm" },
+          detail: { mode: "anthropic" },
         });
       }
 
@@ -483,4 +484,3 @@ Remember: Use these past incidents only as reference examples. Do not copy their
     );
   }
 }
-
