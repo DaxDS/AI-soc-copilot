@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { getAnthropicKey } from "@/lib/openai";
 import { prisma } from "@/lib/db";
 import { auditCaseEvent } from "@/lib/audit";
+import { parseLlmTriage, severityFromRisk } from "@/lib/triage";
 
 const SOC_SYSTEM_PROMPT = `You are an AI SOC (Security Operations Center) Tier-1 copilot. Your job is to triage security alerts and incidents.
 
@@ -12,7 +13,33 @@ For any alert or incident summary the user provides, your internal reasoning sho
 
 You may be provided with "Similar Past Incidents" from a knowledge base. Use these past incidents only as reference examples. Analyze the current incident independently and generate a fresh explanation.
 
-However, your final response will be post-processed by the application, so return a clear, concise explanation as free-form text. Do not invent specific IOCs or log lines; say what you "would" pull from logs or tools.`;
+Do not invent specific IOCs or log lines that were not supplied; say what you "would" pull from logs or tools.
+
+OUTPUT FORMAT (strict, two parts, in this order):
+
+1. The analyst-facing explanation, as clear free-form text. Finish every section you start.
+2. On a new line, a single fenced code block tagged \`soc-json\` containing ONLY this JSON object:
+
+\`\`\`soc-json
+{
+  "severity": "Low" | "Medium" | "High" | "Critical",
+  "confidence": 0.0-1.0,
+  "riskScore": 0-100,
+  "evidence": ["short factual observation drawn from the input", "..."],
+  "mitreTechniques": [{ "id": "T1078", "name": "Valid Accounts" }],
+  "recommendedActions": [
+    { "label": "Force sign-out of all sessions", "risk": "Low" | "Medium" | "High", "requiresApproval": true }
+  ]
+}
+\`\`\`
+
+Rules for the JSON block:
+- It is mandatory. It is the last thing in your response. Nothing follows it.
+- riskScore must agree with severity: Low 0-30, Medium 31-60, High 61-80, Critical 81-100.
+- confidence is your own calibrated confidence, not a placeholder.
+- Benign / legitimate activity is a valid verdict: say Low with a high confidence and an empty or explanatory mitreTechniques list rather than inflating severity.
+- Only list MITRE techniques the supplied evidence actually supports.
+- Every recommendedAction that changes state on a production system sets requiresApproval: true.`;
 
 type Message = { role: "user" | "assistant"; content: string };
 
@@ -380,7 +407,7 @@ Remember: Use these past incidents only as reference examples. Do not copy their
         },
         body: JSON.stringify({
           model: "claude-sonnet-4-5",
-          max_tokens: 1024,
+          max_tokens: 4096,
           system: systemPrompt,
           messages: anthropicMessages,
         }),
@@ -411,15 +438,37 @@ Remember: Use these past incidents only as reference examples. Do not copy their
         );
       }
 
+      const { prose, structured } = parseLlmTriage(content);
+      // Rule-based triage is the floor, not a placeholder: if the model's
+      // structured block is missing or unusable we ship a real verdict derived
+      // from the alert text rather than a constant Medium/50/50%.
+      const fallback = ruleBasedTriage(userContent);
+
+      const riskScore = structured?.riskScore ?? fallback.riskScore;
+      const severity = structured?.severity ?? severityFromRisk(riskScore);
+      const evidence =
+        structured?.evidence && structured.evidence.length > 0
+          ? structured.evidence
+          : fallback.evidence;
+      const mitreTechniques =
+        structured?.mitreTechniques && structured.mitreTechniques.length > 0
+          ? structured.mitreTechniques
+          : fallback.mitreTechniques;
+      const recommendedActions =
+        structured?.recommendedActions && structured.recommendedActions.length > 0
+          ? structured.recommendedActions
+          : fallback.recommendedActions;
+
       const payload = {
-        message: content,
-        evidence: ["LLM analysis"],
-        severity: "Medium",
-        confidence: 0.5,
-        riskScore: 50,
-        mitreTechniques: [],
-        recommendedActions: [],
+        message: prose,
+        evidence,
+        severity,
+        confidence: structured?.confidence ?? fallback.confidence,
+        riskScore,
+        mitreTechniques,
+        recommendedActions,
         similarIncidents,
+        structuredVerdict: structured !== null,
       };
 
       if (caseId) {
