@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { prisma } from "@/lib/db";
 import { auditCaseEvent } from "@/lib/audit";
+import { validateIngestPayload } from "@/lib/ingest-validation";
 
 function unauthorized() {
   return NextResponse.json({ error: "unauthorized" }, { status: 401 });
@@ -20,54 +21,60 @@ export async function POST(request: Request) {
     const token = auth.toLowerCase().startsWith("bearer ") ? auth.slice(7).trim() : "";
     if (token !== secret) return unauthorized();
 
-    const body = await request.json();
-    const title = typeof body.title === "string" ? body.title.trim() : "";
-    const summary = typeof body.summary === "string" ? body.summary.trim() : "";
-    const severity = typeof body.severity === "string" ? body.severity.trim() : "Unknown";
-    const source = typeof body.source === "string" ? body.source.trim() : "Webhook";
-    const riskScore =
-      typeof body.riskScore === "number" && Number.isFinite(body.riskScore)
-        ? Math.max(0, Math.min(100, Math.round(body.riskScore)))
-        : undefined;
-    const raw = body.raw ?? body;
-
-    if (!title) {
-      return NextResponse.json({ error: "title required" }, { status: 400 });
+    const contentType = request.headers.get("content-type") ?? "";
+    if (!contentType.toLowerCase().includes("application/json")) {
+      return NextResponse.json(
+        { error: "content-type must be application/json" },
+        { status: 415 },
+      );
     }
 
-    const created = await prisma.case.create({
-      data: {
-        title,
-        summary,
-        severity,
-        source,
-        riskScore,
-      },
-    });
+    let body: unknown;
+    try {
+      body = await request.json();
+    } catch {
+      return NextResponse.json({ error: "invalid JSON body" }, { status: 400 });
+    }
 
-    await prisma.message.create({
-      data: {
-        caseId: created.id,
-        role: "user",
-        content: summary ? `${title}\n\n${summary}` : title,
-        metadata: { ingested: true, raw },
-      },
-    });
+    const validation = validateIngestPayload(body);
+    if (!validation.ok) {
+      return NextResponse.json({ error: validation.error }, { status: 400 });
+    }
 
-    await auditCaseEvent({
-      caseId: created.id,
-      action: "CASE_IMPORTED",
-      actor: "integration",
-      detail: { source },
+    const { title, summary, severity, source, riskScore, raw } = validation.value;
+
+    const created = await prisma.$transaction(async (tx) => {
+      const incident = await tx.case.create({
+        data: { title, summary, severity, source, riskScore },
+      });
+
+      await tx.message.create({
+        data: {
+          caseId: incident.id,
+          role: "user",
+          content: summary ? `${title}\n\n${summary}` : title,
+          metadata: { ingested: true, raw: raw as any },
+        },
+      });
+
+      await tx.auditEvent.create({
+        data: {
+          caseId: incident.id,
+          action: "CASE_IMPORTED",
+          actor: "integration",
+          detail: { source },
+        },
+      });
+
+      return incident;
     });
 
     return NextResponse.json({ caseId: created.id }, { status: 201 });
   } catch (e) {
     console.error("ingest webhook error:", e);
     return NextResponse.json(
-      { error: e instanceof Error ? e.message : "Server error" },
+      { error: "failed to ingest alert" },
       { status: 500 },
     );
   }
 }
-
