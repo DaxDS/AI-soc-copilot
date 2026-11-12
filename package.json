@@ -9,7 +9,7 @@
     "lint": "eslint",
     "db:generate": "prisma generate",
     "db:migrate": "prisma migrate dev",
-    "test": "tsc src/lib/triage.ts src/lib/triage.test.ts --outDir .test-build --module commonjs --target es2020 --skipLibCheck --esModuleInterop && node --test .test-build/triage.test.js"
+    "test": "tsc src/lib/triage.ts src/lib/triage.test.ts src/lib/ingest-validation.ts src/lib/ingest-validation.test.ts --outDir .test-build --module commonjs --target es2020 --skipLibCheck --esModuleInterop && node --test .test-build/triage.test.js .test-build/ingest-validation.test.js"
   },
   "dependencies": {
     "@prisma/client": "^6.19.2",
