@@ -45,6 +45,11 @@ Open `http://localhost:3000`.
 ### Ingestion webhook (SIEM/SOAR friendly)
 `POST /api/ingest/webhook`
 - Header: `Authorization: Bearer <INGEST_WEBHOOK_SECRET>`
+- Content type: `application/json`
+- Required: a non-empty `title` (maximum 200 characters)
+- Optional fields are type-checked; severity must be `Low`, `Medium`, `High`, `Critical`, or `Unknown`; risk scores are normalized to 0–100
+- Malformed JSON, unsupported content types, and invalid fields receive explicit 4xx responses
+- The case, original message, and import audit event are written in one database transaction
 - Body example:
 
 ```json
